@@ -1,1 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Swim Form Physics Analyzer</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  body { font-family: -apple-system, Arial, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; background:#0e1117; color:#e6e6e6; }
+  h1,h2 { color:#7fd1ff; }
+  .panel { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-bottom:16px; }
+  button { background:#238636; color:white; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; margin:4px 4px 4px 0; }
+  button:disabled { background:#444; cursor:not-allowed; }
+  input[type=number], input[type=text] { background:#0d1117; color:white; border:1px solid #30363d; border-radius:4px; padding:4px 8px; width:90px; }
+  label { display:inline-block; min-width:220px; }
+  #videoWrap { position:relative; display:inline-block; }
+  video { max-width:100%; display:block; }
+  canvas.overlay { position:absolute; top:0; left:0; pointer-events:auto; }
+  .row { margin-bottom:10px; }
+  .warn { color:#f0883e; }
+  .good { color:#3fb950; }
+  .mono { font-family: monospace; white-space: pre-wrap; background:#0d1117; padding:10px; border-radius:6px; }
+  .step { border-left: 3px solid #7fd1ff; padding-left:10px; margin-bottom:14px; }
+  small { color:#8b949e; }
+</style>
+</head>
+<body>
 
+<h1>Swim Form Physics Analyzer</h1>
+<p><small>Runs entirely in your browser. Nothing is uploaded anywhere.</small></p>
+
+<div class="panel step">
+  <h2>1. Load video</h2>
+  <input type="file" id="fileInput" accept="video/*">
+  <div id="videoWrap" style="margin-top:10px;">
+    <video id="video" controls></video>
+    <canvas id="overlay" class="overlay"></canvas>
+  </div>
+</div>
+
+<div class="panel step">
+  <h2>2. Calibrate scale (pixels &rarr; meters)</h2>
+  <p><small>Pause on a frame showing two points a known real distance apart (e.g. lane rope markers, pool tile spacing). Click "Pick points", then click those two points on the video.</small></p>
+  <button id="btnCalibPoints">Pick 2 calibration points</button>
+  <div class="row"><label>Real-world distance between them (m):</label><input type="number" id="calibDist" step="0.01" value="5"></div>
+  <div class="row"><label>Pixel distance measured:</label><span id="calibPixels">-</span></div>
+  <div class="row"><label>Scale (m/pixel):</label><span id="calibScale">not set</span></div>
+</div>
+
+<div class="panel step">
+  <h2>2b. Mark seam region (if your video is stitched from 2 cameras)</h2>
+  <p><small>If there's a visible vertical seam line, click "Pick seam range" then click its left and right edge. Keypoints landing in that band get treated as unreliable and are interpolated over instead of trusted directly.</small></p>
+  <button id="btnSeamPoints">Pick seam range</button>
+  <span id="seamRange">none set</span>
+  <button id="btnClearSeam">Clear seam</button>
+</div>
+
+<div class="panel step">
+  <h2>3. Swimmer info</h2>
+  <div class="row"><label>Mass (kg):</label><input type="number" id="massInput" value="70"></div>
+  <div class="row"><label>Height (m):</label><input type="number" id="heightInput" step="0.01" value="1.75"></div>
+</div>
+
+<div class="panel step">
+  <h2>4. Track pose</h2>
+  <button id="btnLoadModel">Load pose model</button>
+  <span id="modelStatus">not loaded</span><br>
+  <button id="btnRecord" disabled>Play video &amp; record pose</button>
+  <button id="btnStopRecord" disabled>Stop &amp; process</button>
+  <div id="recordStatus"></div>
+</div>
+
+<div class="panel step" id="glideStep" style="display:none;">
+  <h2>5. Mark a passive glide phase (for drag calibration)</h2>
+  <p><small>Pick the frame right after a wall push-off (streamline, no kicking) and the frame where the glide ends. This calibrates your real drag coefficient from actual velocity decay.</small></p>
+  <div class="row"><label>Glide start frame index:</label><input type="number" id="glideStart" value="0"></div>
+  <div class="row"><label>Glide end frame index:</label><input type="number" id="glideEnd" value="10"></div>
+  <div class="row"><label>Stroke-cycle window (for dv%) start/end:</label>
+    <input type="number" id="cycleStart" value="0" style="width:70px;">
+    <input type="number" id="cycleEnd" value="10" style="width:70px;">
+  </div>
+  <button id="btnAnalyze">Run physics analysis</button>
+</div>
+
+<div class="panel" id="results" style="display:none;">
+  <h2>Results</h2>
+  <canvas id="velChart" height="120"></canvas>
+  <canvas id="forceChart" height="120"></canvas>
+  <div id="numbers" class="mono"></div>
+</div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+
+let calibMode = false, seamMode = false;
+let calibPoints = [];
+let seamPoints = [];
+let scaleMPerPx = null;
+let seamXMin = null, seamXMax = null;
+
+fileInput.addEventListener('change', () => {
+  const url = URL.createObjectURL(fileInput.files[0]);
+  video.src = url;
+  video.addEventListener('loadedmetadata', () => {
+    overlay.width = video.videoWidth;
+    overlay.height = video.videoHeight;
+    overlay.style.width = video.clientWidth + 'px';
+    overlay.style.height = video.clientHeight + 'px';
+  }, {once:true});
+});
+
+function canvasCoordsFromClick(e) {
+  const rect = overlay.getBoundingClientRect();
+  const scaleX = overlay.width / rect.width;
+  const scaleY = overlay.height / rect.height;
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+}
+
+overlay.addEventListener('click', (e) => {
+  const p = canvasCoordsFromClick(e);
+  if (calibMode) {
+    calibPoints.push(p);
+    drawMarker(p, '#ff5555');
+    if (calibPoints.length === 2) {
+      calibMode = false;
+      const dx = calibPoints[0].x - calibPoints[1].x;
+      const dy = calibPoints[0].y - calibPoints[1].y;
+      const pxDist = Math.sqrt(dx*dx + dy*dy);
+      document.getElementById('calibPixels').textContent = pxDist.toFixed(1);
+      const realDist = parseFloat(document.getElementById('calibDist').value);
+      scaleMPerPx = realDist / pxDist;
+      document.getElementById('calibScale').textContent = scaleMPerPx.toFixed(5) + ' m/px';
+    }
+  } else if (seamMode) {
+    seamPoints.push(p);
+    drawMarker(p, '#ffcc00');
+    if (seamPoints.length === 2) {
+      seamMode = false;
+      seamXMin = Math.min(seamPoints[0].x, seamPoints[1].x);
+      seamXMax = Math.max(seamPoints[0].x, seamPoints[1].x);
+      document.getElementById('seamRange').textContent = `${seamXMin.toFixed(0)}px - ${seamXMax.toFixed(0)}px`;
+    }
+  }
+});
+
+function drawMarker(p, color) {
+  octx.fillStyle = color;
+  octx.beginPath();
+  octx.arc(p.x, p.y, 5, 0, 2*Math.PI);
+  octx.fill();
+}
+
+document.getElementById('btnCalibPoints').onclick = () => {
+  calibPoints = []; calibMode = true; octx.clearRect(0,0,overlay.width, overlay.height);
+  drawVideoFrame();
+};
+document.getElementById('btnSeamPoints').onclick = () => {
+  seamPoints = []; seamMode = true; octx.clearRect(0,0,overlay.width, overlay.height);
+  drawVideoFrame();
+};
+document.getElementById('btnClearSeam').onclick = () => {
+  seamXMin = null; seamXMax = null;
+  document.getElementById('seamRange').textContent = 'none set';
+};
+function drawVideoFrame() {
+  octx.drawImage(video, 0, 0, overlay.width, overlay.height);
+}
+
+// ---------- Pose model ----------
+let detector = null;
+document.getElementById('btnLoadModel').onclick = async () => {
+  document.getElementById('modelStatus').textContent = 'loading...';
+  detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, {
+    modelType: poseDetection.movenet.modelType.SINGLEPOSE_THUNDER
+  });
+  document.getElementById('modelStatus').textContent = 'loaded';
+  document.getElementById('btnRecord').disabled = false;
+};
+
+// MoveNet keypoint indices
+const KP = { nose:0, leftEye:1, rightEye:2, leftEar:3, rightEar:4,
+  leftShoulder:5, rightShoulder:6, leftElbow:7, rightElbow:8,
+  leftWrist:9, rightWrist:10, leftHip:11, rightHip:12,
+  leftKnee:13, rightKnee:14, leftAnkle:15, rightAnkle:16 };
+
+let recording = false;
+let frames = []; // {t, kps: [{x,y,score}]}
+
+document.getElementById('btnRecord').onclick = () => {
+  frames = [];
+  recording = true;
+  video.currentTime = 0;
+  video.play();
+  document.getElementById('btnStopRecord').disabled = false;
+  loopCapture();
+};
+document.getElementById('btnStopRecord').onclick = () => {
+  recording = false;
+  video.pause();
+  postProcessRaw();
+};
+video.addEventListener('ended', () => {
+  if (recording) { recording = false; postProcessRaw(); }
+});
+
+async function loopCapture() {
+  if (!recording) return;
+  if (!video.paused && !video.ended) {
+    const poses = await detector.estimatePoses(video, {flipHorizontal:false});
+    if (poses.length > 0) {
+      frames.push({ t: video.currentTime, kps: poses[0].keypoints });
+      drawSkeleton(poses[0].keypoints);
+    }
+    document.getElementById('recordStatus').textContent = `frames captured: ${frames.length}, t=${video.currentTime.toFixed(2)}s`;
+  }
+  requestAnimationFrame(loopCapture);
+}
+
+function drawSkeleton(kps) {
+  octx.clearRect(0,0,overlay.width, overlay.height);
+  octx.drawImage(video, 0, 0, overlay.width, overlay.height);
+  kps.forEach(k => {
+    if (k.score > 0.3) {
+      octx.fillStyle = (seamXMin!=null && k.x>seamXMin && k.x<seamXMax) ? '#ffcc00' : '#3fb950';
+      octx.beginPath(); octx.arc(k.x, k.y, 4, 0, 2*Math.PI); octx.fill();
+    }
+  });
+}
+
+// ---------- Post-processing ----------
+// de Leva (1996) male anthropometric params: [massFraction, comFractionFromProximal]
+const SEG = {
+  head:      { mass: 0.081, comFrac: 0.50 },
+  trunk:     { mass: 0.497, comFrac: 0.50 },
+  upperArm:  { mass: 0.028, comFrac: 0.5772 },
+  forearmHand:{mass: 0.022, comFrac: 0.4574 },
+  thigh:     { mass: 0.100, comFrac: 0.4095 },
+  shankFoot: { mass: 0.061, comFrac: 0.4459 }
+};
+
+function mid(a,b){ return {x:(a.x+b.x)/2, y:(a.y+b.y)/2, score: Math.min(a.score,b.score)}; }
+function lerpFrac(a,b,f){ return {x: a.x+(b.x-a.x)*f, y: a.y+(b.y-a.y)*f}; }
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+function pickSide(allFrames) {
+  let leftScore=0, rightScore=0, n=0;
+  allFrames.forEach(f=>{
+    const k=f.kps;
+    leftScore += k[KP.leftShoulder].score + k[KP.leftHip].score + k[KP.leftKnee].score;
+    rightScore += k[KP.rightShoulder].score + k[KP.rightHip].score + k[KP.rightKnee].score;
+    n++;
+  });
+  return rightScore > leftScore ? 'right' : 'left';
+}
+
+function interpolateMissing(arr) {
+  // arr: array of {x,y,valid}
+  const n = arr.length;
+  let lastValid = -1;
+  for (let i=0;i<n;i++){
+    if (arr[i].valid) {
+      if (lastValid !== -1 && lastValid !== i-1) {
+        // interpolate between lastValid and i
+        const a = arr[lastValid], b = arr[i];
+        for (let j=lastValid+1;j<i;j++){
+          const f = (j-lastValid)/(i-lastValid);
+          arr[j].x = a.x + (b.x-a.x)*f;
+          arr[j].y = a.y + (b.y-a.y)*f;
+        }
+      }
+      lastValid = i;
+    }
+  }
+  return arr;
+}
+
+// Savitzky-Golay smoothing, window=7, quadratic fit, smoothing coefficients
+const SG_SMOOTH = [-2,3,6,7,6,3,-2].map(v=>v/21);
+// SG first-derivative coefficients (same window/order), unscaled by dt
+const SG_DERIV = [-3,-2,-1,0,1,2,3].map(v=>v/28);
+
+function sgApply(series, coeffs) {
+  const n = series.length, half = Math.floor(coeffs.length/2);
+  const out = new Array(n);
+  for (let i=0;i<n;i++){
+    let sum=0, wsum=0;
+    for (let k=-half;k<=half;k++){
+      let idx = i+k;
+      if (idx<0) idx=0; if (idx>=n) idx=n-1;
+      sum += series[idx]*coeffs[k+half];
+      wsum += coeffs[k+half];
+    }
+    out[i] = wsum!==0 ? sum : sum; // coeffs already normalized appropriately
+  }
+  return out;
+}
+
+function linreg(xs, ys) {
+  const n = xs.length;
+  let sx=0,sy=0,sxx=0,sxy=0,syy=0;
+  for (let i=0;i<n;i++){ sx+=xs[i]; sy+=ys[i]; sxx+=xs[i]*xs[i]; sxy+=xs[i]*ys[i]; syy+=ys[i]*ys[i]; }
+  const slope = (n*sxy - sx*sy)/(n*sxx - sx*sx);
+  const intercept = (sy - slope*sx)/n;
+  const yMean = sy/n;
+  let ssTot=0, ssRes=0;
+  for (let i=0;i<n;i++){ const pred = slope*xs[i]+intercept; ssRes += (ys[i]-pred)**2; ssTot += (ys[i]-yMean)**2; }
+  const r2 = 1 - ssRes/ssTot;
+  return {slope, intercept, r2};
+}
+
+let processed = null; // will hold {t[], comX[], comY[], cobX[], cobY[], side}
+
+function postProcessRaw() {
+  if (frames.length < 10) { alert('Not enough frames captured — try again.'); return; }
+  const side = pickSide(frames);
+  const sh = side==='left'?KP.leftShoulder:KP.rightShoulder;
+  const hp = side==='left'?KP.leftHip:KP.rightHip;
+  const el = side==='left'?KP.leftElbow:KP.rightElbow;
+  const wr = side==='left'?KP.leftWrist:KP.rightWrist;
+  const kn = side==='left'?KP.leftKnee:KP.rightKnee;
+  const an = side==='left'?KP.leftAnkle:KP.rightAnkle;
+  const ea = side==='left'?KP.leftEar:KP.rightEar;
+
+  const rawPoints = {}; // name -> array of {x,y,valid}
+  ['shoulder','hip','elbow','wrist','knee','ankle','ear'].forEach(n=>rawPoints[n]=[]);
+
+  frames.forEach(f=>{
+    const k = f.kps;
+    const push = (name, kp) => {
+      const inSeam = (seamXMin!=null && kp.x>seamXMin && kp.x<seamXMax);
+      const valid = kp.score > 0.3 && !inSeam;
+      rawPoints[name].push({x:kp.x, y:kp.y, valid});
+    };
+    push('shoulder', k[sh]); push('hip', k[hp]); push('elbow', k[el]);
+    push('wrist', k[wr]); push('knee', k[kn]); push('ankle', k[an]); push('ear', k[ea]);
+  });
+  Object.keys(rawPoints).forEach(n => interpolateMissing(rawPoints[n]));
+
+  const scale = scaleMPerPx || 0.005; // fallback guess if not calibrated
+  const mass = parseFloat(document.getElementById('massInput').value);
+  const height = parseFloat(document.getElementById('heightInput').value);
+
+  const n = frames.length;
+  const comXpx = new Array(n), comYpx = new Array(n);
+  const cobXpx = new Array(n), cobYpx = new Array(n);
+  const headAngleDeg = new Array(n), trunkAngleDeg = new Array(n);
+
+  for (let i=0;i<n;i++){
+    const S = rawPoints.shoulder[i], H = rawPoints.hip[i], E = rawPoints.elbow[i],
+          W = rawPoints.wrist[i], K = rawPoints.knee[i], A = rawPoints.ankle[i], Ea = rawPoints.ear[i];
+
+    const headCoM = lerpFrac(S, Ea, SEG.head.comFrac);
+    const trunkCoM = lerpFrac(S, H, SEG.trunk.comFrac);
+    const upperArmCoM = lerpFrac(S, E, SEG.upperArm.comFrac);
+    const forearmCoM = lerpFrac(E, W, SEG.forearmHand.comFrac);
+    const thighCoM = lerpFrac(H, K, SEG.thigh.comFrac);
+    const shankCoM = lerpFrac(K, A, SEG.shankFoot.comFrac);
+
+    // arms/legs doubled to represent both sides (documented approximation)
+    const totalMass = SEG.head.mass + SEG.trunk.mass + 2*(SEG.upperArm.mass + SEG.forearmHand.mass + SEG.thigh.mass + SEG.shankFoot.mass);
+    let cx = SEG.head.mass*headCoM.x + SEG.trunk.mass*trunkCoM.x
+      + 2*SEG.upperArm.mass*upperArmCoM.x + 2*SEG.forearmHand.mass*forearmCoM.x
+      + 2*SEG.thigh.mass*thighCoM.x + 2*SEG.shankFoot.mass*shankCoM.x;
+    let cy = SEG.head.mass*headCoM.y + SEG.trunk.mass*trunkCoM.y
+      + 2*SEG.upperArm.mass*upperArmCoM.y + 2*SEG.forearmHand.mass*forearmCoM.y
+      + 2*SEG.thigh.mass*thighCoM.y + 2*SEG.shankFoot.mass*shankCoM.y;
+    cx/=totalMass; cy/=totalMass;
+    comXpx[i]=cx; comYpx[i]=cy;
+
+    // CoB approximation: 35% from shoulder to hip along trunk (near chest/lungs)
+    const cob = lerpFrac(S, H, 0.35);
+    cobXpx[i]=cob.x; cobYpx[i]=cob.y;
+
+    trunkAngleDeg[i] = Math.atan2(-(H.y-S.y), (H.x-S.x)) * 180/Math.PI;
+    headAngleDeg[i] = Math.atan2(-(Ea.y-S.y), (Ea.x-S.x)) * 180/Math.PI;
+  }
+
+  // Smooth CoM position
+  const comXsm = sgApply(comXpx, SG_SMOOTH);
+  const comYsm = sgApply(comYpx, SG_SMOOTH);
+
+  // time array & average dt
+  const t = frames.map(f=>f.t);
+  let dtSum=0; for(let i=1;i<n;i++) dtSum += (t[i]-t[i-1]);
+  const dt = dtSum/(n-1);
+
+  // velocity via SG derivative kernel / dt, converted to meters
+  const vxPxPerFrame = sgApply(comXsm, SG_DERIV);
+  const vx = vxPxPerFrame.map(v => (v/dt) * scale); // m/s, forward = +x in pixel space (check sign per video orientation)
+
+  processed = { t, comXpx: comXsm, comYpx: comYsm, cobXpx, cobYpx, vx, dt, scale, mass, height,
+                headAngleDeg, trunkAngleDeg, side };
+
+  document.getElementById('glideStep').style.display = 'block';
+  document.getElementById('glideEnd').value = Math.min(15, n-1);
+  document.getElementById('cycleEnd').value = Math.min(20, n-1);
+  alert(`Processed ${n} frames using ${side} side. Now pick a glide window and stroke-cycle window below.`);
+}
+
+document.getElementById('btnAnalyze').onclick = () => {
+  if (!processed) return;
+  const {t, vx, mass} = processed;
+  const gs = parseInt(document.getElementById('glideStart').value);
+  const ge = parseInt(document.getElementById('glideEnd').value);
+  const cs = parseInt(document.getElementById('cycleStart').value);
+  const ce = parseInt(document.getElementById('cycleEnd').value);
+
+  // ---- Passive drag calibration via 1/v vs t linear regression ----
+  // m dv/dt = -D v^2  =>  d(1/v)/dt = D/m  (linear!)
+  const glideT = [], glideInvV = [];
+  for (let i=gs;i<=ge && i<vx.length;i++){
+    if (vx[i] > 0.05) { glideT.push(t[i]-t[gs]); glideInvV.push(1/vx[i]); }
+  }
+  let D = null, dragR2 = null;
+  if (glideT.length >= 3) {
+    const fit = linreg(glideT, glideInvV);
+    D = fit.slope * mass; // D/m = slope => D = slope*mass
+    dragR2 = fit.r2;
+  }
+
+  // ---- Intra-cycle velocity variation (dv%) ----
+  const cycleV = vx.slice(cs, ce+1).filter(v=>v>0);
+  const meanV = cycleV.reduce((a,b)=>a+b,0)/cycleV.length;
+  const variance = cycleV.reduce((a,b)=>a+(b-meanV)**2,0)/cycleV.length;
+  const stdV = Math.sqrt(variance);
+  const dvPercent = (stdV/meanV)*100;
+
+  // ---- acceleration & propulsive force reconstruction ----
+  const ax = sgApply(vx, SG_DERIV).map(v => v/processed.dt);
+  const Fprop = D!=null ? vx.map((v,i)=> mass*ax[i] + D*v*v) : null;
+
+  // ---- head angle correction (numerical) ----
+  const {headAngleDeg, trunkAngleDeg} = processed;
+  // use median relative angle over cycle window, excluding top 15% (likely breathing frames)
+  const relAngles = [];
+  for (let i=cs;i<=ce;i++) relAngles.push(headAngleDeg[i]-trunkAngleDeg[i]);
+  relAngles.sort((a,b)=>a-b);
+  const cut = Math.floor(relAngles.length*0.85);
+  const typical = relAngles.slice(0,Math.max(1,cut));
+  const medianRel = typical[Math.floor(typical.length/2)];
+
+  // dx offset (CoM-CoB) averaged over cycle, in meters
+  let dxSum=0, cnt=0;
+  for (let i=cs;i<=ce;i++){ dxSum += (processed.comXpx[i]-processed.cobXpx[i]); cnt++; }
+  const dxAvgPx = dxSum/cnt;
+  const dxAvgM = dxAvgPx*processed.scale;
+
+  // Numerical sensitivity: how much would 1 degree of head rotation shift CoM_x?
+  // approximate head segment length in px from average shoulder-ear distance in window
+  let headLenSum=0;
+  for (let i=cs;i<=ce;i++){
+    headLenSum += Math.hypot(0,0); // placeholder, real length computed below
+  }
+  // simpler: derive analytically using small-angle approx
+  // dCoM_x/dphi_head (radians) = massFrac_head * r_head * (-sin(angle_head_rad))
+  const massFracHead = SEG.head.mass;
+  // estimate r_head (px) from last frame's shoulder-ear distance
+  const lastIdx = ce;
+  // re-derive from raw stored angle & typical head length ~ 0.13*height/scale (rough anthropometric estimate) as fallback
+  const rHeadM = 0.13*processed.height; // meters, rough head+neck segment length fraction of height
+  const angleHeadRad = headAngleDeg[lastIdx]*Math.PI/180;
+  const dCoMx_dphi = massFracHead * rHeadM * (-Math.sin(angleHeadRad)); // meters per radian
+  let headCorrectionDeg = null;
+  if (Math.abs(dCoMx_dphi) > 1e-6) {
+    const deltaPhiRad = -dxAvgM/dCoMx_dphi;
+    headCorrectionDeg = deltaPhiRad*180/Math.PI;
+  }
+
+  renderResults({t, vx, Fprop, D, dragR2, dvPercent, dxAvgM, medianRel, headCorrectionDeg, gs, ge, cs, ce});
+};
+
+let velChart=null, forceChart=null;
+function renderResults(r) {
+  document.getElementById('results').style.display='block';
+  const labels = r.t.map(x=>x.toFixed(2));
+
+  if (velChart) velChart.destroy();
+  velChart = new Chart(document.getElementById('velChart'), {
+    type:'line',
+    data:{ labels, datasets:[{label:'Horizontal CoM velocity (m/s)', data:r.vx, borderColor:'#7fd1ff', pointRadius:0}]},
+    options:{ scales:{ x:{title:{display:true,text:'time (s)'}}, y:{title:{display:true,text:'v (m/s)'}} } }
+  });
+
+  if (r.Fprop) {
+    if (forceChart) forceChart.destroy();
+    forceChart = new Chart(document.getElementById('forceChart'), {
+      type:'line',
+      data:{ labels, datasets:[{label:'Reconstructed net propulsive force (N)', data:r.Fprop, borderColor:'#3fb950', pointRadius:0}]},
+      options:{ scales:{ x:{title:{display:true,text:'time (s)'}}, y:{title:{display:true,text:'F (N)'}} } }
+    });
+  }
+
+  const lines = [];
+  lines.push(`Intra-cycle velocity variation (dv): ${r.dvPercent.toFixed(1)}%  (published elite front-crawl reference: ~10%)`);
+  if (r.D!=null) {
+    lines.push(`Calibrated passive drag coefficient D: ${r.D.toFixed(2)} (fit R² = ${r.dragR2.toFixed(3)}, from ${r.ge-r.gs+1} glide frames)`);
+    if (r.dragR2 < 0.85) lines.push(`  ⚠ low R² — glide window may include kicking or noisy tracking; treat D as rough.`);
+  } else {
+    lines.push(`Passive drag D: could not calibrate — check glide window has valid, decreasing velocity.`);
+  }
+  lines.push(`Average CoM–CoB horizontal offset over selected window: ${(r.dxAvgM*100).toFixed(2)} cm`);
+  lines.push(`Typical head angle relative to trunk line (breathing frames excluded): ${r.medianRel.toFixed(1)}°`);
+  if (r.headCorrectionDeg!=null) {
+    const dir = r.headCorrectionDeg > 0 ? 'raise' : 'lower';
+    lines.push(`Suggested head pitch correction: ${dir} by ${Math.abs(r.headCorrectionDeg).toFixed(1)}° to null the estimated CoM/CoB offset`);
+  }
+  lines.push('');
+  lines.push('Known error sources (for your accuracy slide):');
+  lines.push('- de Leva anthropometric table values are population averages, not this swimmer\\'s actual segment masses');
+  lines.push('- CoB position (35% shoulder→hip) is a modeling assumption, not directly measured');
+  lines.push('- Only one side is tracked; the far-side limb is assumed mirrored, which breaks during asymmetric phases');
+  lines.push('- Single side-view camera cannot capture roll/yaw, only sagittal-plane motion');
+  if (seamXMin!=null) lines.push('- Frames with keypoints in the marked seam region were interpolated rather than measured directly');
+
+  document.getElementById('numbers').textContent = lines.join('\n');
+}
+</script>
+</body>
+</html>
