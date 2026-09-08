@@ -1,1 +1,17 @@
-
+body { font-family: -apple-system, Arial, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; background:#0e1117; color:#e6e6e6; }
+h1,h2 { color:#7fd1ff; }
+.panel { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-bottom:16px; }
+button { background:#238636; color:white; border:none; padding:8px 14px; border-radius:6px; cursor:pointer; margin:4px 4px 4px 0; }
+button:disabled { background:#444; cursor:not-allowed; }
+input[type=number], input[type=text] { background:#0d1117; color:white; border:1px solid #30363d; border-radius:4px; padding:4px 8px; width:90px; }
+label { display:inline-block; min-width:260px; }
+#videoWrap { position:relative; display:inline-block; }
+video { max-width:100%; display:block; }
+canvas.overlay { position:absolute; top:0; left:0; pointer-events:auto; }
+.row { margin-bottom:10px; }
+.warn { color:#f0883e; }
+.good { color:#3fb950; }
+.mono { font-family: monospace; white-space: pre-wrap; background:#0d1117; padding:10px; border-radius:6px; }
+.step { border-left: 3px solid #7fd1ff; padding-left:10px; margin-bottom:14px; }
+small { color:#8b949e; }
+nav a { color:#7fd1ff; margin-right:16px; }
