@@ -1,1 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flow Visualizer — 2D Navier-Stokes</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<nav><a href="index.html">Analyzer</a><a href="flow-visualizer.html">Flow Visualizer</a></nav>
+<h1>Live 2D Incompressible Flow (Navier–Stokes)</h1>
+<p><small>Draw a cross-section below (streamlined vs. hunched body position) and watch real flow separation and vortex shedding form behind it. This solves the actual incompressible Navier–Stokes equations with a semi-Lagrangian advection step and a pressure-projection step — it is not a canned animation.</small></p>
 
+<div class="panel">
+  <button id="btnStreamlined">Load streamlined shape</button>
+  <button id="btnHunched">Load hunched shape</button>
+  <button id="btnClear">Clear obstacle (draw your own — click and drag)</button>
+  <br><br>
+  <canvas id="flowCanvas" width="480" height="480" style="border:1px solid #30363d; background:black; cursor:crosshair;"></canvas>
+</div>
+
+<script src="js/flowSolver.js"></script>
+<script>
+const N = 96;
+FlowSolver.init(N, { dt: 0.12, diff: 0.00005, visc: 0.00005 });
+
+const canvas = document.getElementById('flowCanvas');
+const ctx = canvas.getContext('2d');
+const cell = canvas.width / (N + 2);
+
+function makeMask(shapeFn) {
+  const mask = new Uint8Array((N + 2) * (N + 2));
+  for (let i = 0; i <= N + 1; i++) {
+    for (let j = 0; j <= N + 1; j++) {
+      if (shapeFn(i, j)) mask[FlowSolver.index(i, j)] = 1;
+    }
+  }
+  return mask;
+}
+
+// A blunt/hunched cross-section: wide vertical extent -> more separated wake
+function hunchedShape(i, j) {
+  const cx = N * 0.3, cy = N * 0.5;
+  return (i - cx) ** 2 / 100 + (j - cy) ** 2 / 400 < 1;
+}
+// A streamlined cross-section: elongated, tapered -> attached flow
+function streamlinedShape(i, j) {
+  const cx = N * 0.3, cy = N * 0.5;
+  return (i - cx) ** 2 / 400 + (j - cy) ** 2 / 64 < 1;
+}
+
+let drawing = false;
+let customMask = new Uint8Array((N + 2) * (N + 2));
+canvas.addEventListener('mousedown', () => drawing = true);
+canvas.addEventListener('mouseup', () => drawing = false);
+canvas.addEventListener('mousemove', (e) => {
+  if (!drawing) return;
+  const rect = canvas.getBoundingClientRect();
+  const i = Math.floor((e.clientX - rect.left) / cell);
+  const j = Math.floor((e.clientY - rect.top) / cell);
+  for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+    const idx = FlowSolver.index(i + di, j + dj);
+    if (idx >= 0 && idx < customMask.length) customMask[idx] = 1;
+  }
+  FlowSolver.setObstacle(customMask);
+});
+
+document.getElementById('btnStreamlined').onclick = () => FlowSolver.setObstacle(makeMask(streamlinedShape));
+document.getElementById('btnHunched').onclick = () => FlowSolver.setObstacle(makeMask(hunchedShape));
+document.getElementById('btnClear').onclick = () => { customMask = new Uint8Array((N + 2) * (N + 2)); FlowSolver.setObstacle(customMask); };
+
+FlowSolver.setObstacle(makeMask(streamlinedShape));
+
+function render() {
+  const { dens, N: n } = FlowSolver.getState();
+  const img = ctx.createImageData(canvas.width, canvas.height);
+  for (let i = 0; i <= n + 1; i++) {
+    for (let j = 0; j <= n + 1; j++) {
+      const d = Math.min(1, dens[FlowSolver.index(i, j)]);
+      const px = Math.floor(i * cell), py = Math.floor(j * cell);
+      for (let dx = 0; dx < cell; dx++) {
+        for (let dy = 0; dy < cell; dy++) {
+          const x = px + dx, y = py + dy;
+          if (x >= canvas.width || y >= canvas.height) continue;
+          const off = (y * canvas.width + x) * 4;
+          img.data[off] = 60 + d * 100;
+          img.data[off + 1] = 120 + d * 135;
+          img.data[off + 2] = 255 * d + 40;
+          img.data[off + 3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function loop() {
+  FlowSolver.step(2.0);
+  render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
