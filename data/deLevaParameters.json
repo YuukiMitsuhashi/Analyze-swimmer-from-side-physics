@@ -1,1 +1,10 @@
-
+{
+  "_source": "de Leva (1996) adjustments to Zatsiorsky-Seluyanov anthropometric tables, male values",
+  "_note": "massFrac: fraction of total body mass. comFrac: center of mass location as a fraction of segment length from the proximal joint. relDensity: segment density relative to water (1.0), used for center-of-buoyancy estimation and is an approximate literature-informed value, not measured per-subject.",
+  "head":       { "massFrac": 0.081, "comFrac": 0.50,   "relDensity": 1.03 },
+  "trunk":      { "massFrac": 0.497, "comFrac": 0.50,   "relDensity": 0.94 },
+  "upperArm":   { "massFrac": 0.028, "comFrac": 0.5772, "relDensity": 1.07 },
+  "forearmHand":{ "massFrac": 0.022, "comFrac": 0.4574, "relDensity": 1.10 },
+  "thigh":      { "massFrac": 0.100, "comFrac": 0.4095, "relDensity": 1.05 },
+  "shankFoot":  { "massFrac": 0.061, "comFrac": 0.4459, "relDensity": 1.09 }
+}
